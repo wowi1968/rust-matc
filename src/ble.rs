@@ -51,10 +51,10 @@ pub async fn find_by_discriminator(discriminator: u16, short_match: bool, scan_t
     let adapters = manager.adapters().await.context("listing BLE adapters")?;
     let central = adapters.into_iter().next().context("no BLE adapter found")?;
 
-    let filter = ScanFilter {
-        services: vec![MATTER_SERVICE_UUID],
-    };
-    central.start_scan(filter).await.context("start BLE scan")?;
+    // Empty filter: on Windows (WinRT) a service-UUID ScanFilter only matches the
+    // advertised service-UUID list, not the service data where Matter puts 0xFFF6,
+    // so it would find nothing. We filter manually by service data below instead.
+    central.start_scan(ScanFilter::default()).await.context("start BLE scan")?;
 
     let mut events = central.events().await.context("BLE event stream")?;
     let deadline = tokio::time::Instant::now() + scan_timeout;
@@ -109,7 +109,8 @@ pub async fn scan_commissionable(scan_timeout: Duration) -> Result<Vec<Commissio
     let central = adapters.into_iter().next().context("no BLE adapter found")?;
 
     log::debug!("Starting BLE scan for commissionable devices ({}s timeout)...", scan_timeout.as_secs());
-    central.start_scan(ScanFilter { services: vec![MATTER_SERVICE_UUID] }).await?;
+    // Empty filter for Windows (WinRT) compatibility; we filter by service data below.
+    central.start_scan(ScanFilter::default()).await?;
     log::debug!("Scanning for BLE devices...");
     tokio::time::sleep(scan_timeout).await;
     log::debug!("BLE scan complete, processing results...");
