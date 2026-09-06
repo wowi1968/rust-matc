@@ -21,7 +21,7 @@ impl std::error::Error for ConnectionClosed {}
 use anyhow::{Context, Result};
 use std::{
     collections::HashMap,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -29,6 +29,51 @@ use std::{
     time::Duration,
 };
 use tokio::{net::UdpSocket, sync::Mutex};
+
+/// Bind the local UDP socket used for all Matter traffic.
+///
+/// An `0.0.0.0` (IPv4-unspecified) request is transparently upgraded to a
+/// dual-stack IPv6 socket bound to `[::]`, so that IPv6-only peers such as
+/// Matter-over-Thread devices are reachable while IPv4 peers still work via
+/// IPv4-mapped addresses. Falls back to a plain IPv4 socket if the dual-stack
+/// bind fails (e.g. IPv6 disabled on the host).
+async fn bind_socket(local: &str) -> Result<UdpSocket> {
+    let addr: SocketAddr = local
+        .parse()
+        .with_context(|| format!("parse local address '{}'", local))?;
+
+    // Only unspecified IPv4 is upgraded; a specific IPv4 address is honored as-is.
+    let want_dual_stack = matches!(addr, SocketAddr::V4(v4) if v4.ip().is_unspecified())
+        || matches!(addr, SocketAddr::V6(_));
+
+    if want_dual_stack {
+        let bind_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), addr.port());
+        match build_dual_stack_v6(bind_addr) {
+            Ok(sock) => return Ok(sock),
+            Err(e) => {
+                log::warn!(
+                    "dual-stack IPv6 bind on {} failed ({}), falling back to IPv4",
+                    bind_addr,
+                    e
+                );
+            }
+        }
+    }
+
+    UdpSocket::bind(addr)
+        .await
+        .with_context(|| format!("bind UDP socket on {}", addr))
+}
+
+/// Build a dual-stack IPv6 UDP socket (`IPV6_V6ONLY = false`) bound to `addr`.
+fn build_dual_stack_v6(addr: SocketAddr) -> Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let sock = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+    sock.set_only_v6(false)?;
+    sock.set_nonblocking(true)?;
+    sock.bind(&addr.into())?;
+    UdpSocket::from_std(sock.into()).context("convert to tokio UdpSocket")
+}
 
 /// Normalize a peer address string so that its address family matches the
 /// local socket. This canonical form is used both as the connection map key
@@ -182,7 +227,7 @@ impl Transport {
 
     /// Bind a UDP socket and spawn background tasks.
     pub async fn new(local: &str) -> Result<Arc<Self>> {
-        let socket = UdpSocket::bind(local).await?;
+        let socket = bind_socket(local).await?;
         let (remove_channel_sender, remove_channel_receiver) =
             tokio::sync::mpsc::unbounded_channel();
         let stop_receive_token = tokio_util::sync::CancellationToken::new();
