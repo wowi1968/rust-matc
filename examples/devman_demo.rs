@@ -36,7 +36,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use matc::{
-    clusters::{self, codec::{descriptor_cluster, on_off}},
+    clusters::{self, codec::{binding_cluster::Target, descriptor_cluster, on_off}},
     controller,
     devman::{DeviceManager, ManagerConfig},
     tlv,
@@ -183,6 +183,100 @@ enum Commands {
         /// New name
         new_name: String,
     },
+    /// Configure device bindings (Binding cluster 0x001E)
+    Binding {
+        /// Device name or node ID
+        device: String,
+        /// Endpoint hosting the Binding cluster (usually 1)
+        #[clap(long, default_value_t = 1)]
+        endpoint: u16,
+        #[command(subcommand)]
+        action: BindingAction,
+    },
+}
+
+/// Actions for the `binding` subcommand (Binding cluster 0x001E).
+#[derive(Subcommand, Debug)]
+enum BindingAction {
+    /// List the current binding table
+    List,
+    /// Add a unicast binding target (node + endpoint)
+    AddUnicast {
+        /// Target node ID (decimal or 0x-hex)
+        #[clap(long, value_parser = parse_u64_radix)]
+        node: u64,
+        /// Target endpoint on that node
+        #[clap(long)]
+        target_endpoint: u16,
+        /// Optional cluster ID to restrict the binding to (decimal or 0x-hex)
+        #[clap(long, value_parser = parse_u32_radix)]
+        cluster: Option<u32>,
+    },
+    /// Add a groupcast binding target (multicast group)
+    AddGroup {
+        /// Target group ID
+        #[clap(long)]
+        group: u16,
+        /// Optional cluster ID to restrict the binding to (decimal or 0x-hex)
+        #[clap(long, value_parser = parse_u32_radix)]
+        cluster: Option<u32>,
+    },
+    /// Remove every binding matching the given (partial) filter
+    Remove {
+        #[clap(long, value_parser = parse_u64_radix)]
+        node: Option<u64>,
+        #[clap(long)]
+        group: Option<u16>,
+        #[clap(long)]
+        target_endpoint: Option<u16>,
+        #[clap(long, value_parser = parse_u32_radix)]
+        cluster: Option<u32>,
+    },
+    /// Remove all bindings
+    Clear,
+}
+
+/// Parse a u64 given in decimal or `0x`-prefixed hexadecimal.
+fn parse_u64_radix(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
+    } else {
+        s.parse::<u64>()
+    };
+    parsed.map_err(|e| format!("invalid number '{}': {}", s, e))
+}
+
+/// Parse a u32 given in decimal or `0x`-prefixed hexadecimal.
+fn parse_u32_radix(s: &str) -> Result<u32, String> {
+    let s = s.trim();
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16)
+    } else {
+        s.parse::<u32>()
+    };
+    parsed.map_err(|e| format!("invalid number '{}': {}", s, e))
+}
+
+fn print_bindings(targets: &[Target]) {
+    if targets.is_empty() {
+        println!("Binding table is empty.");
+        return;
+    }
+    println!("Binding table ({} entries):", targets.len());
+    for (i, t) in targets.iter().enumerate() {
+        let cluster = t
+            .cluster
+            .map(|c| format!("0x{:04X}", c))
+            .unwrap_or_else(|| "all".to_string());
+        match (t.node, t.endpoint, t.group) {
+            (Some(node), Some(ep), _) => {
+                println!("  [{}] unicast node=0x{:X} endpoint={} cluster={}", i, node, ep, cluster)
+            }
+            (_, _, Some(group)) => println!("  [{}] group group={} cluster={}", i, group, cluster),
+            _ => println!("  [{}] {:?}", i, t),
+        }
+    }
 }
 
 async fn connect_by_name_or_id(dm: &DeviceManager, device: &str) -> Result<matc::controller::Connection> {
@@ -471,6 +565,36 @@ async fn main() -> Result<()> {
             tlv_value.write_string(2, &value)?;
             conn.write_request(endpoint, cluster, attribute, &tlv_value.data).await?;
             println!("Write successful");
+        },
+        Commands::Binding { device, endpoint, action } => {
+            let dm = DeviceManager::load(data_dir).await?;
+            let node_id = resolve_node_id(&dm, &device)?;
+            match action {
+                BindingAction::List => {
+                    let targets = dm.read_bindings(node_id, endpoint).await?;
+                    print_bindings(&targets);
+                }
+                BindingAction::AddUnicast { node, target_endpoint, cluster } => {
+                    dm.add_binding(node_id, endpoint, Target::unicast(node, target_endpoint, cluster)).await?;
+                    println!("Unicast binding added.");
+                    print_bindings(&dm.read_bindings(node_id, endpoint).await?);
+                }
+                BindingAction::AddGroup { group, cluster } => {
+                    dm.add_binding(node_id, endpoint, Target::group(group, cluster)).await?;
+                    println!("Group binding added.");
+                    print_bindings(&dm.read_bindings(node_id, endpoint).await?);
+                }
+                BindingAction::Remove { node, group, target_endpoint, cluster } => {
+                    let filter = Target { node, group, endpoint: target_endpoint, cluster };
+                    let removed = dm.remove_binding(node_id, endpoint, &filter).await?;
+                    println!("Removed {} binding(s).", removed);
+                    print_bindings(&dm.read_bindings(node_id, endpoint).await?);
+                }
+                BindingAction::Clear => {
+                    dm.clear_bindings(node_id, endpoint).await?;
+                    println!("Binding table cleared.");
+                }
+            }
         },
     }
 

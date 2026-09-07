@@ -67,6 +67,7 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 
 use crate::{certmanager, controller, discover::{self, MatterDeviceInfo}, fabric::Fabric, mdns2, onboarding, transport};
+use crate::clusters::codec::binding_cluster::{self, Target};
 
 pub struct DeviceManager {
     base_path: String,
@@ -492,5 +493,38 @@ impl DeviceManager {
     /// Get the base path.
     pub fn base_path(&self) -> &str {
         &self.base_path
+    }
+
+    /// Read the Binding cluster (0x001E) table of a device.
+    ///
+    /// `endpoint` is the endpoint hosting the Binding cluster (usually 1).
+    pub async fn read_bindings(&self, node_id: u64, endpoint: u16) -> Result<Vec<Target>> {
+        let conn = self.connect(node_id).await?;
+        binding_cluster::read_binding(&conn, endpoint).await
+    }
+
+    /// Replace the entire Binding table of a device with `targets`.
+    pub async fn set_bindings(&self, node_id: u64, endpoint: u16, targets: &[Target]) -> Result<()> {
+        let conn = self.connect(node_id).await?;
+        binding_cluster::write_binding(&conn, endpoint, targets).await
+    }
+
+    /// Append a single binding target to a device without dropping existing entries.
+    pub async fn add_binding(&self, node_id: u64, endpoint: u16, target: Target) -> Result<()> {
+        let conn = self.connect(node_id).await?;
+        binding_cluster::add_binding(&conn, endpoint, target).await
+    }
+
+    /// Remove every binding entry matching `target` (only its `Some` fields are
+    /// compared). Returns the number of entries removed.
+    pub async fn remove_binding(&self, node_id: u64, endpoint: u16, target: &Target) -> Result<usize> {
+        let conn = self.connect(node_id).await?;
+        binding_cluster::remove_binding(&conn, endpoint, target).await
+    }
+
+    /// Clear the entire Binding table of a device.
+    pub async fn clear_bindings(&self, node_id: u64, endpoint: u16) -> Result<()> {
+        let conn = self.connect(node_id).await?;
+        binding_cluster::clear_binding(&conn, endpoint).await
     }
 }

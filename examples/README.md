@@ -183,6 +183,26 @@ cargo run --example color -- --device-address 192.168.1.100:5540 move-to-color-t
 ```
 
 
+### [`binding.rs`](binding.rs) - Binding Configuration CLI
+
+Configure the **Binding** cluster (0x001E) of a device so it can control another node/endpoint
+or a multicast group directly, per the Matter specification. Supports listing, adding (unicast or
+group targets), removing and clearing binding entries.
+
+```bash
+# Show the current binding table of endpoint 1
+cargo run --example binding -- --device-address 192.168.1.100:5540 list
+
+# Bind endpoint 1 to node 0x12 endpoint 1, On/Off cluster (0x0006)
+cargo run --example binding -- --device-address 192.168.1.100:5540 \
+    add-unicast --node 0x12 --target-endpoint 1 --cluster 0x0006
+
+# Bind to multicast group 5 and clear the table again
+cargo run --example binding -- --device-address 192.168.1.100:5540 add-group --group 5 --cluster 0x0006
+cargo run --example binding -- --device-address 192.168.1.100:5540 clear
+```
+
+
 ### [`shell.rs`](shell.rs) - Interactive Controller Shell
 
 A long-running REPL that keeps device connections alive between commands, so after the initial

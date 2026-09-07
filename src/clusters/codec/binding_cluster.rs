@@ -12,12 +12,31 @@ use serde_json;
 
 // Struct definitions
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Target {
     pub node: Option<u64>,
     pub group: Option<u16>,
     pub endpoint: Option<u16>,
     pub cluster: Option<u32>,
+}
+
+impl Target {
+    /// Build a unicast binding target pointing at a specific node/endpoint.
+    ///
+    /// `cluster` restricts the binding to a single cluster; pass `None` to bind
+    /// all clusters of the endpoint. Per the Matter specification a unicast
+    /// target carries `node` and `endpoint` and must not carry `group`.
+    pub fn unicast(node: u64, endpoint: u16, cluster: Option<u32>) -> Self {
+        Self { node: Some(node), group: None, endpoint: Some(endpoint), cluster }
+    }
+
+    /// Build a groupcast binding target pointing at a multicast group.
+    ///
+    /// Per the Matter specification a group target carries `group` and must not
+    /// carry `node` or `endpoint`.
+    pub fn group(group: u16, cluster: Option<u32>) -> Self {
+        Self { node: None, group: Some(group), endpoint: None, cluster }
+    }
 }
 
 // Attribute decoders
@@ -84,4 +103,125 @@ pub async fn read_binding(conn: &crate::controller::Connection, endpoint: u16) -
     let tlv = conn.read_request2(endpoint, crate::clusters::defs::CLUSTER_ID_BINDING, crate::clusters::defs::CLUSTER_BINDING_ATTR_ID_BINDING).await?;
     decode_binding(&tlv)
 }
+
+// Attribute encoder
+
+/// Encode the `Binding` attribute (0x0000) value for a write request.
+///
+/// The value is a Matter `list[TargetStruct]` and is encoded as a TLV array of
+/// anonymous structs tagged with the AttributeDataIB data tag (2), ready to be
+/// passed to [`crate::controller::Connection::write_request`].
+pub fn encode_binding(targets: &[Target]) -> anyhow::Result<Vec<u8>> {
+    let elements = targets
+        .iter()
+        .map(|t| {
+            let mut fields = Vec::new();
+            if let Some(x) = t.node { fields.push((1, tlv::TlvItemValueEnc::UInt64(x)).into()); }
+            if let Some(x) = t.group { fields.push((2, tlv::TlvItemValueEnc::UInt16(x)).into()); }
+            if let Some(x) = t.endpoint { fields.push((3, tlv::TlvItemValueEnc::UInt16(x)).into()); }
+            if let Some(x) = t.cluster { fields.push((4, tlv::TlvItemValueEnc::UInt32(x)).into()); }
+            tlv::TlvItemEnc { tag: 0, value: tlv::TlvItemValueEnc::StructAnon(fields) }
+        })
+        .collect();
+    let tlv = tlv::TlvItemEnc { tag: 2, value: tlv::TlvItemValueEnc::Array(elements) };
+    Ok(tlv.encode()?)
+}
+
+// Typed facade (writes)
+
+/// Write the `Binding` attribute of cluster `Binding` (endpoint), replacing the
+/// device's entire binding table with `targets`.
+///
+/// The Binding attribute is a whole-list attribute: the supplied slice becomes
+/// the complete binding table. To add or remove single entries without dropping
+/// existing ones use [`add_binding`] / [`remove_binding`], or read the current
+/// table with [`read_binding`], modify it and write it back.
+pub async fn write_binding(conn: &crate::controller::Connection, endpoint: u16, targets: &[Target]) -> anyhow::Result<()> {
+    let payload = encode_binding(targets)?;
+    conn.write_request(
+        endpoint,
+        crate::clusters::defs::CLUSTER_ID_BINDING,
+        crate::clusters::defs::CLUSTER_BINDING_ATTR_ID_BINDING,
+        &payload,
+    )
+    .await
+}
+
+/// Append a single binding target to the device's existing binding table
+/// (read-modify-write of the whole-list `Binding` attribute).
+pub async fn add_binding(conn: &crate::controller::Connection, endpoint: u16, target: Target) -> anyhow::Result<()> {
+    let mut current = read_binding(conn, endpoint).await?;
+    current.push(target);
+    write_binding(conn, endpoint, &current).await
+}
+
+/// Remove every binding entry that matches `target` from the device's binding
+/// table (read-modify-write of the whole-list `Binding` attribute).
+///
+/// Only the fields set (`Some`) in `target` are compared, so a partially
+/// specified target (e.g. only `node`) removes all entries matching those
+/// fields. Returns the number of entries that were removed.
+pub async fn remove_binding(conn: &crate::controller::Connection, endpoint: u16, target: &Target) -> anyhow::Result<usize> {
+    let current = read_binding(conn, endpoint).await?;
+    let before = current.len();
+    let remaining: Vec<Target> = current
+        .into_iter()
+        .filter(|t| {
+            let node_match = target.node.is_none_or(|v| t.node == Some(v));
+            let group_match = target.group.is_none_or(|v| t.group == Some(v));
+            let endpoint_match = target.endpoint.is_none_or(|v| t.endpoint == Some(v));
+            let cluster_match = target.cluster.is_none_or(|v| t.cluster == Some(v));
+            !(node_match && group_match && endpoint_match && cluster_match)
+        })
+        .collect();
+    let removed = before - remaining.len();
+    if removed > 0 {
+        write_binding(conn, endpoint, &remaining).await?;
+    }
+    Ok(removed)
+}
+
+/// Clear the device's binding table by writing an empty `Binding` list.
+pub async fn clear_binding(conn: &crate::controller::Connection, endpoint: u16) -> anyhow::Result<()> {
+    write_binding(conn, endpoint, &[]).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encode_binding_roundtrip() {
+        let targets = vec![
+            Target::unicast(0x1234, 1, Some(0x0006)),
+            Target::group(5, None),
+        ];
+        let encoded = encode_binding(&targets).unwrap();
+
+        // The encoder tags the list with the AttributeDataIB data tag (2);
+        // decode_tlv returns that single item, so its value is the target list.
+        let item = crate::tlv::decode_tlv(&encoded).unwrap();
+        assert_eq!(item.tag, 2);
+        let parsed = decode_binding(&item.value).unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].node, Some(0x1234));
+        assert_eq!(parsed[0].endpoint, Some(1));
+        assert_eq!(parsed[0].cluster, Some(0x0006));
+        assert_eq!(parsed[0].group, None);
+        assert_eq!(parsed[1].group, Some(5));
+        assert_eq!(parsed[1].node, None);
+        assert_eq!(parsed[1].endpoint, None);
+        assert_eq!(parsed[1].cluster, None);
+    }
+
+    #[test]
+    fn test_encode_empty_binding() {
+        let encoded = encode_binding(&[]).unwrap();
+        let item = crate::tlv::decode_tlv(&encoded).unwrap();
+        assert!(decode_binding(&item.value).unwrap().is_empty());
+    }
+}
+
+
 
