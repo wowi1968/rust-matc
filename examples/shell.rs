@@ -20,7 +20,7 @@
 
 use anyhow::Result;
 use matc::{
-    clusters::{self, defs::*},
+    clusters::{self, codec::binding_cluster::Target, defs::*},
     controller::{Connection, Subscription},
     devman::{DeviceManager, ManagerConfig},
     discover, im,
@@ -45,10 +45,10 @@ const DISCOVER_TIMEOUT_SECS: u64 = 5;
 const COMMANDS: &[&str] = &[
     "help", "quit", "exit",
     "list", "status",
-    "init", "commission", "commission-discover", "commission-ble-wifi", "commission-ble-thread", "discover",
+    "init", "commission", "commission-discover", "commission-ble-wifi", "commission-ble-thread", "discover", "scan-ble",
     "connect", "connect-all", "disconnect",
     "on", "off", "toggle", "level", "hue",
-    "read", "read-all", "clusters", "parts", "invoke",
+    "read", "read-all", "write", "clusters", "parts", "invoke", "binding",
     "subscribe", "subscribe-onoff", "subscribe-all", "subscribe-events", "unsubscribe", "subscriptions",
     "rename", "remove",
 ];
@@ -56,7 +56,7 @@ const COMMANDS: &[&str] = &[
 /// Commands whose first argument is a device name/id.
 const DEVICE_COMMANDS: &[&str] = &[
     "on", "off", "toggle", "level", "hue",
-    "read", "read-all", "clusters", "parts", "invoke",
+    "read", "read-all", "write", "clusters", "parts", "invoke", "binding",
     "subscribe", "subscribe-onoff", "subscribe-all", "subscribe-events", "unsubscribe",
     "connect", "disconnect", "rename", "remove",
 ];
@@ -278,6 +278,35 @@ impl Shell {
         let conn = self.connections.get(&node_id).unwrap();
         conn.read_request2(endpoint, cluster, attr).await
     }
+
+    /// Write attribute, retrying with a fresh connection on error.
+    async fn write_with_retry(
+        &mut self,
+        device: &str,
+        endpoint: u16,
+        cluster: u32,
+        attr: u32,
+        payload: &[u8],
+    ) -> Result<()> {
+        let node_id = self.resolve_node_id(device)?;
+
+        let try1: Result<(), anyhow::Error> = if let Some(conn) = self.connections.get(&node_id) {
+            match conn.write_request(endpoint, cluster, attr, payload).await {
+                Ok(_) => return Ok(()),
+                Err(e) => Err(e),
+            }
+        } else {
+            Err(anyhow::anyhow!("no connection"))
+        };
+
+        let _ = try1;
+        self.connections.remove(&node_id);
+        println!("  reconnecting to {} (node {})…", device, node_id);
+        let conn = Arc::new(self.dm.connect(node_id).await?);
+        self.connections.insert(node_id, conn);
+        let conn = self.connections.get(&node_id).unwrap();
+        conn.write_request(endpoint, cluster, attr, payload).await
+    }
 }
 
 // ── Command parsing ───────────────────────────────────────────────────────────
@@ -355,6 +384,7 @@ Matter Interactive Shell — available commands:
     commission-ble-thread <pairing_code> <node_id> <name> <dataset_hex>
                                           Commission via BLE, provision Thread (requires --features ble)
     discover [--timeout N]               Discover commissionable devices (default 5s)
+    scan-ble [--timeout N]               Scan for BLE commissionable devices (requires --features ble)
 
   Connection management:
     connect <device>                      Pre-connect (CASE auth) to a device
@@ -379,6 +409,22 @@ Matter Interactive Shell — available commands:
     read-all <device>                     Read all known attributes on all endpoints
     clusters <device> [endpoint]          List supported clusters on endpoint (default 0)
     parts <device>                        List endpoints (descriptor parts list)
+
+  Attribute writing:
+    write <device> <endpoint> <cluster> <attr> <value>
+                                          Write a string attribute value
+
+  Bindings (Binding cluster 0x001E, --endpoint = host endpoint, default 1):
+    binding <device> list [--endpoint N]
+                                          Show the binding table
+    binding <device> add-unicast <node> <target_ep> [cluster] [--endpoint N]
+                                          Add a unicast binding target
+    binding <device> add-group <group> [cluster] [--endpoint N]
+                                          Add a groupcast binding target
+    binding <device> remove [--node N] [--group N] [--target-ep N] [--cluster N] [--endpoint N]
+                                          Remove bindings matching the filter
+    binding <device> clear [--endpoint N]
+                                          Remove all bindings
 
   Subscriptions:
     subscribe <device> <endpoint> <cluster> <attr>
@@ -866,6 +912,192 @@ async fn cmd_invoke(shell: &mut Shell, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_write(shell: &mut Shell, args: &[String]) -> Result<()> {
+    if args.len() < 5 {
+        println!("usage: write <device> <endpoint> <cluster> <attr> <value>");
+        return Ok(());
+    }
+    let device = &args[0];
+    let endpoint = parse_u16(&args[1])?;
+    let cluster = parse_u32(&args[2])?;
+    let attr = parse_u32(&args[3])?;
+    let value = &args[4];
+    let mut tlv = matc::tlv::TlvBuffer::new();
+    tlv.write_string(2, value)?;
+    shell.write_with_retry(device, endpoint, cluster, attr, &tlv.data).await?;
+    println!(
+        "wrote '{}' → '{}' ep{} cluster=0x{:04x} attr=0x{:04x}",
+        value, device, endpoint, cluster, attr
+    );
+    Ok(())
+}
+
+/// Collect positional (non-flag) arguments, skipping any `--flag value` pairs.
+fn positional_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i].starts_with("--") {
+            i += 2; // skip flag and its value
+        } else {
+            out.push(args[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Find `--flag <value>` in args and parse it as u64 (decimal or 0x-hex).
+fn flag_u64(args: &[String], flag: &str) -> Result<Option<u64>> {
+    match args.iter().position(|a| a == flag) {
+        Some(i) => {
+            let v = args.get(i + 1).ok_or_else(|| anyhow::anyhow!("{} needs a value", flag))?;
+            Ok(Some(parse_u64(v)?))
+        }
+        None => Ok(None),
+    }
+}
+
+fn flag_u32(args: &[String], flag: &str) -> Result<Option<u32>> {
+    match args.iter().position(|a| a == flag) {
+        Some(i) => {
+            let v = args.get(i + 1).ok_or_else(|| anyhow::anyhow!("{} needs a value", flag))?;
+            Ok(Some(parse_u32(v)?))
+        }
+        None => Ok(None),
+    }
+}
+
+fn flag_u16(args: &[String], flag: &str) -> Result<Option<u16>> {
+    match args.iter().position(|a| a == flag) {
+        Some(i) => {
+            let v = args.get(i + 1).ok_or_else(|| anyhow::anyhow!("{} needs a value", flag))?;
+            Ok(Some(parse_u16(v)?))
+        }
+        None => Ok(None),
+    }
+}
+
+fn print_bindings(targets: &[Target]) {
+    if targets.is_empty() {
+        println!("Binding table is empty.");
+        return;
+    }
+    println!("Binding table ({} entries):", targets.len());
+    for (i, t) in targets.iter().enumerate() {
+        let cluster = t
+            .cluster
+            .map(|c| format!("0x{:04X}", c))
+            .unwrap_or_else(|| "all".to_string());
+        match (t.node, t.endpoint, t.group) {
+            (Some(node), Some(ep), _) => {
+                println!("  [{}] unicast node=0x{:X} endpoint={} cluster={}", i, node, ep, cluster)
+            }
+            (_, _, Some(group)) => println!("  [{}] group group={} cluster={}", i, group, cluster),
+            _ => println!("  [{}] {:?}", i, t),
+        }
+    }
+}
+
+async fn cmd_binding(shell: &mut Shell, args: &[String]) -> Result<()> {
+    if args.len() < 2 {
+        println!("usage: binding <device> <list|add-unicast|add-group|remove|clear> [args] [--endpoint N]");
+        return Ok(());
+    }
+    let device = &args[0];
+    let node_id = shell.resolve_node_id(device)?;
+    let endpoint = flag_u16(args, "--endpoint")?.unwrap_or(1);
+    let action = args[1].as_str();
+    let pos = positional_args(&args[2..]);
+
+    match action {
+        "list" => {
+            print_bindings(&shell.dm.read_bindings(node_id, endpoint).await?);
+        }
+        "add-unicast" => {
+            if pos.len() < 2 {
+                println!("usage: binding <device> add-unicast <target_node> <target_endpoint> [cluster] [--endpoint N]");
+                return Ok(());
+            }
+            let node = parse_u64(&pos[0])?;
+            let target_ep = parse_u16(&pos[1])?;
+            let cluster = match pos.get(2) {
+                Some(c) => Some(parse_u32(c)?),
+                None => flag_u32(args, "--cluster")?,
+            };
+            shell.dm.add_binding(node_id, endpoint, Target::unicast(node, target_ep, cluster)).await?;
+            println!("Unicast binding added.");
+            print_bindings(&shell.dm.read_bindings(node_id, endpoint).await?);
+        }
+        "add-group" => {
+            if pos.is_empty() {
+                println!("usage: binding <device> add-group <group> [cluster] [--endpoint N]");
+                return Ok(());
+            }
+            let group = parse_u16(&pos[0])?;
+            let cluster = match pos.get(1) {
+                Some(c) => Some(parse_u32(c)?),
+                None => flag_u32(args, "--cluster")?,
+            };
+            shell.dm.add_binding(node_id, endpoint, Target::group(group, cluster)).await?;
+            println!("Group binding added.");
+            print_bindings(&shell.dm.read_bindings(node_id, endpoint).await?);
+        }
+        "remove" => {
+            let filter = Target {
+                node: flag_u64(args, "--node")?,
+                group: flag_u16(args, "--group")?,
+                endpoint: flag_u16(args, "--target-ep")?,
+                cluster: flag_u32(args, "--cluster")?,
+            };
+            let removed = shell.dm.remove_binding(node_id, endpoint, &filter).await?;
+            println!("Removed {} binding(s).", removed);
+            print_bindings(&shell.dm.read_bindings(node_id, endpoint).await?);
+        }
+        "clear" => {
+            shell.dm.clear_bindings(node_id, endpoint).await?;
+            println!("Binding table cleared.");
+        }
+        other => {
+            println!("Unknown binding action '{}'. Use list|add-unicast|add-group|remove|clear.", other);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ble")]
+async fn cmd_scan_ble(args: &[String]) -> Result<()> {
+    let timeout = flag_u64(args, "--timeout")?.unwrap_or(DISCOVER_TIMEOUT_SECS);
+    println!("Scanning BLE for commissionable Matter devices for {}s …", timeout);
+    let devices = matc::ble::scan_commissionable(Duration::from_secs(timeout)).await?;
+    if devices.is_empty() {
+        println!("No BLE commissionable devices found.");
+    } else {
+        println!(
+            "{:<6} {:<6} {:<6} {:<3} {:<5} {:<20} Address",
+            "Disc", "VID", "PID", "CM", "RSSI", "Name"
+        );
+        println!("{}", "─".repeat(80));
+        for d in devices {
+            let rssi = d.rssi.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+            let name = d.name.as_deref().unwrap_or("");
+            println!(
+                "{:<6} 0x{:04x} 0x{:04x} {:<3} {:<5} {:<20} {}",
+                d.discriminator, d.vendor_id, d.product_id,
+                if d.cm_flag { "y" } else { "n" },
+                rssi, name, d.address
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "ble"))]
+async fn cmd_scan_ble(_args: &[String]) -> Result<()> {
+    println!("scan-ble requires building with --features ble");
+    Ok(())
+}
+
 /// Build a human-readable label for a cluster/attribute pair.
 fn attr_label(cluster: u32, attr: u32) -> String {
     let cluster_name = matc::clusters::names::get_cluster_name(cluster).unwrap_or("?");
@@ -1159,6 +1391,7 @@ async fn dispatch(shell: &mut Shell, tokens: &[String]) -> Result<bool> {
         "commission-ble-wifi" => cmd_commission_ble_wifi(shell, args).await?,
         "commission-ble-thread" => cmd_commission_ble_thread(shell, args).await?,
         "discover" => cmd_discover(args).await?,
+        "scan-ble" => cmd_scan_ble(args).await?,
 
         "list" | "ls" => cmd_list(shell)?,
         "status" => cmd_status(shell)?,
@@ -1177,10 +1410,12 @@ async fn dispatch(shell: &mut Shell, tokens: &[String]) -> Result<bool> {
 
         "read" => cmd_read(shell, args).await?,
         "read-all" => cmd_read_all(shell, args).await?,
+        "write" => cmd_write(shell, args).await?,
         "clusters" => cmd_clusters(shell, args).await?,
         "parts" => cmd_parts(shell, args).await?,
 
         "invoke" => cmd_invoke(shell, args).await?,
+        "binding" => cmd_binding(shell, args).await?,
 
         "subscribe" => cmd_subscribe(shell, args).await?,
         "subscribe-onoff" => cmd_subscribe_onoff(shell, args).await?,
