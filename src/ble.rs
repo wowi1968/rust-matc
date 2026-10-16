@@ -115,10 +115,11 @@ pub async fn scan_commissionable(scan_timeout: Duration) -> Result<Vec<Commissio
     tokio::time::sleep(scan_timeout).await;
     log::debug!("BLE scan complete, processing results...");
     central.stop_scan().await.ok();
-    log::debug!("Retrieving discovered BLE peripherals...");
+    let peripherals = central.peripherals().await?;
+    log::debug!("Retrieving discovered BLE peripherals... found {} device(s)", peripherals.len());
 
     let mut found = Vec::new();
-    for peripheral in central.peripherals().await? {
+    for peripheral in peripherals {
         let props = match peripheral.properties().await? {
             Some(p) => p,
             None => continue,
