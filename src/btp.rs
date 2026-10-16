@@ -28,26 +28,45 @@ pub struct BlePeripheral {
     pub write_c1: mpsc::Sender<Vec<u8>>,
     pub read_c2: mpsc::Receiver<Vec<u8>>,
     pub att_mtu: usize,
-    pub(crate) c2_abort: tokio::task::AbortHandle,
-    pub(crate) disconnect: Box<dyn FnOnce() + Send>,
+    pub(crate) cleanup: BleCleanup,
 }
 
+pub(crate) struct BleCleanup {
+    c2_abort: tokio::task::AbortHandle,
+    disconnect: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl BleCleanup {
+    pub(crate) fn new(
+        c2_abort: tokio::task::AbortHandle,
+        disconnect: Box<dyn FnOnce() + Send>,
+    ) -> Self {
+        Self {
+            c2_abort,
+            disconnect: std::sync::Mutex::new(Some(disconnect)),
+        }
+    }
+}
+
+impl Drop for BleCleanup {
+    fn drop(&mut self) {
+        self.c2_abort.abort();
+        if let Some(disconnect) = self
+            .disconnect
+            .get_mut()
+            .expect("BLE cleanup lock poisoned")
+            .take()
+        {
+            disconnect();
+        }
+    }
+}
 
 pub struct BtpConnection {
     incoming: Mutex<mpsc::Receiver<Vec<u8>>>,
     outgoing: mpsc::Sender<Vec<BtpSegment>>,
     mtu_payload: usize,
-    c2_abort: tokio::task::AbortHandle,
-    disconnect: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
-}
-
-impl Drop for BtpConnection {
-    fn drop(&mut self) {
-        self.c2_abort.abort();
-        if let Some(f) = self.disconnect.lock().unwrap().take() {
-            f();
-        }
-    }
+    _cleanup: BleCleanup,
 }
 
 struct BtpSegment {
@@ -139,8 +158,7 @@ impl BtpConnection {
             incoming: Mutex::new(incoming_rx),
             outgoing: outgoing_tx,
             mtu_payload: negotiated_mtu,
-            c2_abort: peripheral.c2_abort,
-            disconnect: std::sync::Mutex::new(Some(peripheral.disconnect)),
+            _cleanup: peripheral.cleanup,
         }))
     }
 }
