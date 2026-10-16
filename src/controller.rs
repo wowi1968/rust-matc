@@ -288,7 +288,8 @@ impl Controller {
     /// 8. Establishes CASE + sends CommissioningComplete over UDP.
     /// 9. Returns an authenticated [`Connection`] ready for commands.
     ///
-    /// Requires the `ble` Cargo feature.
+    /// Requires the `ble` Cargo feature. Uses the proxy configured with
+    /// [`crate::ble::set_proxy`], or local Bluetooth if none is configured.
     #[cfg(feature = "ble")]
     pub async fn commission_ble(
         &self,
