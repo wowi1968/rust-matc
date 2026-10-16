@@ -18,13 +18,9 @@ const CMD_GENERAL_COMMISSIONING_ARMFAILSAFE: u32 = 0;
 //const CMD_GENERAL_COMMISSIONING_SETREGULATORYCONFIG: u32 = 2;
 const CMD_GENERAL_COMMISSIONING_COMMISSIONINGCOMPLETE: u32 = 4;
 
-#[cfg(feature = "ble")]
 const CLUSTER_NETWORK_COMMISSIONING: u32 = 0x31;
-#[cfg(feature = "ble")]
 const CMD_NETWORK_ADD_OR_UPDATE_WIFI: u32 = 2;
-#[cfg(feature = "ble")]
 const CMD_NETWORK_ADD_OR_UPDATE_THREAD: u32 = 3;
-#[cfg(feature = "ble")]
 const CMD_NETWORK_CONNECT: u32 = 6;
 
 /// Credentials for the network the device should join after commissioning.
@@ -350,7 +346,6 @@ async fn arm_failsafe(
     Ok(())
 }*/
 
-#[cfg(feature = "ble")]
 async fn add_or_update_wifi(
     retrctx: &mut retransmit::RetrContext<'_>,
     ssid: &[u8],
@@ -377,7 +372,6 @@ async fn add_or_update_wifi(
     Ok(ssid.to_vec())
 }
 
-#[cfg(feature = "ble")]
 // Parse a Thread Operational Dataset (simple TLV: 1-byte type, 1-byte length, N-byte value)
 // and return the Extended PAN ID bytes (type 0x02, length 8).
 fn extract_thread_extended_pan_id(dataset: &[u8]) -> Option<&[u8]> {
@@ -396,7 +390,6 @@ fn extract_thread_extended_pan_id(dataset: &[u8]) -> Option<&[u8]> {
     None
 }
 
-#[cfg(feature = "ble")]
 async fn add_or_update_thread(
     retrctx: &mut retransmit::RetrContext<'_>,
     dataset: &[u8],
@@ -424,7 +417,6 @@ async fn add_or_update_thread(
     Ok(ext_pan_id)
 }
 
-#[cfg(feature = "ble")]
 async fn connect_network(
     retrctx: &mut retransmit::RetrContext<'_>,
     network_id: &[u8],
@@ -450,7 +442,6 @@ async fn connect_network(
     Ok(())
 }
 
-#[cfg(feature = "ble")]
 pub(crate) async fn commission_ble_phase(
     ble_connection: &dyn ConnectionTrait,
     pase_session: &mut session::Session,
@@ -508,7 +499,6 @@ pub(crate) async fn commission_ble_phase(
     Ok(())
 }
 
-#[cfg(feature = "ble")]
 pub(crate) async fn commissioning_complete_udp(
     udp_connection: &dyn ConnectionTrait,
     cm: &dyn certmanager::CertManager,

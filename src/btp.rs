@@ -1,8 +1,6 @@
 //! Bluetooth Transport Protocol (BTP) - Matter over BLE.
 
 
-#![cfg(feature = "ble")]
-
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};

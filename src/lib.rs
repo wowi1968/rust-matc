@@ -22,7 +22,8 @@
 //! - [devman](devman) - High level device manager which uses all above components to provide simpler api.
 //!                      It stores device information and certificates in specified directory and allows
 //!                      to commission new devices (by address, by manual pairing code with mDNS discovery,
-//!                      or over BLE with Wi-Fi/Thread credential provisioning - requires `ble` feature)
+//!                      or over BLE with Wi-Fi/Thread credential provisioning - via a proxy or local Bluetooth
+//!                      with the `ble` feature)
 //!                      and connect to already commissioned devices by name.
 //!                      Connections automatically re-discover devices via operational mDNS if the stored
 //!                      address is stale (e.g. device changed IP).
@@ -99,10 +100,8 @@
 //! # }
 //! ```
 //!
-//! Example how to commission a Wi-Fi device that advertises over BLE (requires `ble` feature):
+//! Example how to commission a Wi-Fi device over BLE (configure a proxy or enable the `ble` feature):
 //! ```no_run
-//! # #[cfg(feature = "ble")]
-//! # {
 //! # use matc::devman::DeviceManager;
 //! # use anyhow::Result;
 //! # use matc::NetworkCreds;
@@ -120,7 +119,6 @@
 //!     },
 //! ).await?;
 //! # Ok(())
-//! # }
 //! # }
 //! ```
 //!
@@ -272,9 +270,7 @@
 #![doc = include_str!("../readme.md")]
 
 mod active_connection;
-#[cfg(feature = "ble")]
 pub mod ble;
-#[cfg(feature = "ble")]
 pub mod btp;
 pub mod cert_matter;
 pub mod cert_x509;

@@ -19,7 +19,7 @@ It supports controller side of:
   * variant of [SIGMA](https://scispace.com/pdf/sigma-the-sign-and-mac-approach-to-authenticated-diffie-103fql3b25.pdf)
 * Commissioning procedure
   * sign and push certificates to device
-  * BLE commissioning with Wi-Fi/Thread credential provisioning (opt-in, `--features ble`)
+  * BLE commissioning with Wi-Fi/Thread credential provisioning (via a proxy, or local Bluetooth with `--features ble`)
 * Basic interactions
   * Read/Write attributes
   * Invoke commands
@@ -29,8 +29,11 @@ See [examples](https://github.com/tom-code/rust-matc/tree/main/examples) for usa
 
 ## BLE proxy
 
-With `--features ble`, BLE uses the local Bluetooth adapter by default. An
-application can instead implement the transport-neutral
+Bluetooth proxy support, BTP, and BLE commissioning are available without any
+Cargo feature. The `ble` feature enables only the local Bluetooth backend
+(`btleplug`); proxy-only builds do not depend on `btleplug`.
+
+An application can implement the transport-neutral
 [`BleProxy`](src/ble/proxy.rs) and `BleGattConnection` traits to bridge to a
 Bluetooth proxy, for example in an iOS or Android app. No network protocol or
 mobile implementation is imposed or included.
@@ -43,7 +46,7 @@ fn configure_mobile_proxy(proxy: Arc<dyn BleProxy>) {
     ble::set_proxy(Some(proxy));
 }
 
-fn restore_local_bluetooth() {
+fn remove_proxy() {
     ble::set_proxy(None);
 }
 ```
@@ -55,6 +58,11 @@ Those existing calls need no other changes. When configured, the proxy is used
 without initializing the local BLE adapter; proxy errors do not trigger a local
 fallback. Resetting the setting affects only new operations. In-flight operations
 and discovered peripheral handles keep their original backend.
+
+Without a configured proxy, BLE operations use local Bluetooth if built with
+`--features ble`. Otherwise, scans and discriminator searches return an explicit
+error asking the application to configure a proxy or enable the feature. Calling
+`ble::set_proxy(None)` does not enable local Bluetooth in a proxy-only build.
 
 `ble::proxy_active()` reports whether a proxy is configured. At `info` log level
 (target `matc::ble`), changes to the proxy setting and every scan, search, and connect
@@ -82,6 +90,6 @@ rust-matc. Protect and authenticate any remote transport: commissioning data mus
 not be exposed over an untrusted connection.
 
 `CommissionableDevice::peripheral` is now a backend-neutral `PeripheralHandle`.
-Pass it to `ble::connect_peripheral` as before; that function also still accepts
-a native btleplug `Peripheral` for explicitly local connections. Code that accessed
-btleplug-specific methods through the field must match `PeripheralHandle::Local`.
+Pass it to `ble::connect_peripheral` as before. With the `ble` feature, that function
+also accepts a native btleplug `Peripheral` for explicitly local connections, and
+`PeripheralHandle::Local` is available for accessing btleplug-specific methods.
