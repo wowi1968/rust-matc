@@ -366,9 +366,13 @@ mod tests {
         }
         let _reset = ResetProxy;
         assert!(crate::ble::current_proxy().is_none());
+        assert!(!crate::ble::proxy_active());
+        #[cfg(not(feature = "ble"))]
+        assert_local_ble_unavailable().await;
         let (proxy, _tx) = fixture();
         let proxy = Arc::new(proxy);
         crate::ble::set_proxy(Some(proxy.clone()));
+        assert!(crate::ble::proxy_active());
         let mut devices = crate::ble::scan_commissionable(Duration::ZERO)
             .await
             .unwrap();
@@ -379,6 +383,9 @@ mod tests {
         wait_for(|| proxy.connection.disconnected.load(Ordering::SeqCst) == 1).await;
         crate::ble::set_proxy(None);
         assert!(crate::ble::current_proxy().is_none());
+        assert!(!crate::ble::proxy_active());
+        #[cfg(not(feature = "ble"))]
+        assert_local_ble_unavailable().await;
         let peripheral = crate::ble::connect_peripheral(devices.remove(0).peripheral)
             .await
             .unwrap();
@@ -393,6 +400,25 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("proxy offline"));
+        let error = crate::ble::find_by_discriminator(0xabc, false, Duration::ZERO)
+            .await
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains("proxy offline"));
+    }
+
+    #[cfg(not(feature = "ble"))]
+    async fn assert_local_ble_unavailable() {
+        let scan_error = crate::ble::scan_commissionable(Duration::ZERO)
+            .await
+            .unwrap_err();
+        let find_error = crate::ble::find_by_discriminator(0xabc, false, Duration::ZERO)
+            .await
+            .err()
+            .unwrap();
+        for error in [scan_error, find_error] {
+            assert_eq!(error.to_string(), crate::ble::LOCAL_BLE_UNAVAILABLE);
+        }
     }
 
     #[tokio::test]

@@ -150,6 +150,9 @@ For simplicity this example uses hardcoded values.
 
 Commissions a Wi-Fi Matter device that is advertising over BLE, provisions Wi-Fi credentials,
 and toggles the On/Off cluster to verify the connection. Requires the `ble` feature.
+This standalone example uses local Bluetooth. Applications using a configured
+`matc::ble::BleProxy` can use the same commissioning APIs without that feature;
+see the [BLE proxy documentation](../readme.md#ble-proxy).
 
 The full BLE flow is: BLE scan -> BTP PASE -> AddNOC -> NetworkCommissioning (Wi-Fi or Thread
 credentials) -> drop BLE -> operational mDNS -> UDP CASE -> CommissioningComplete.
@@ -267,4 +270,3 @@ cargo run --example simple
 # 2. Run advanced operations on the commissioned device
 cargo run --example simple2
 ```
-

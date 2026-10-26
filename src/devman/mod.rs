@@ -319,8 +319,8 @@ impl DeviceManager {
     /// over BTP, optionally provisions network credentials, then completes over
     /// UDP+CASE once the device is reachable on the IP network.
     ///
-    /// Requires the `ble` Cargo feature.
-    #[cfg(feature = "ble")]
+    /// Uses the proxy configured with [`crate::ble::set_proxy`], or local
+    /// Bluetooth with the `ble` Cargo feature. Without either, returns an error.
     pub async fn commission_ble_with_code(
         &self,
         pairing_code: &str,

@@ -288,9 +288,9 @@ impl Controller {
     /// 8. Establishes CASE + sends CommissioningComplete over UDP.
     /// 9. Returns an authenticated [`Connection`] ready for commands.
     ///
-    /// Requires the `ble` Cargo feature. Uses the proxy configured with
-    /// [`crate::ble::set_proxy`], or local Bluetooth if none is configured.
-    #[cfg(feature = "ble")]
+    /// Uses the proxy configured with [`crate::ble::set_proxy`], or local
+    /// Bluetooth if the `ble` Cargo feature is enabled. Without either, returns
+    /// an error.
     pub async fn commission_ble(
         &self,
         discriminator: u16,
@@ -362,7 +362,6 @@ impl Controller {
         Err(anyhow::anyhow!("failed to commission device over UDP at any discovered address"))
     }
 
-    #[cfg(feature = "ble")]
     async fn discover_operational_addresses(
         &self,
         node_id: u64,

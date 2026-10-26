@@ -1,38 +1,50 @@
 //! BLE scanner and GATT connector for Matter commissioning.
 //!
-//! Uses [`btleplug`] by default, or a transport-neutral [`BleProxy`] set with
-//! [`set_proxy`]. Proxy errors are returned without falling back to local BLE.
+//! Uses a transport-neutral [`BleProxy`] set with [`set_proxy`], or the local
+//! Bluetooth adapter when the `ble` feature is enabled and no proxy is set.
+//! Proxy errors are returned without falling back to local BLE.
 //!
-
-#![cfg(feature = "ble")]
 
 use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
+#[cfg(feature = "ble")]
+use anyhow::Context;
+#[cfg(feature = "ble")]
 use btleplug::{
     api::{
         Central, CentralEvent, Manager as _, Peripheral as _, ScanFilter, WriteType,
     },
     platform::{Manager, Peripheral},
 };
+#[cfg(feature = "ble")]
 use futures::StreamExt;
+#[cfg(feature = "ble")]
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::btp::{BleCleanup, BlePeripheral};
+#[cfg(feature = "ble")]
+use crate::btp::BleCleanup;
+use crate::btp::BlePeripheral;
 
 mod proxy;
 pub use proxy::{BleAdvertisement, BleGattConnection, BleProxy};
 
 static PROXY: RwLock<Option<Arc<dyn BleProxy>>> = RwLock::new(None);
 
-/// Set the process-wide BLE proxy, or restore local Bluetooth with `None`.
+#[cfg(not(feature = "ble"))]
+const LOCAL_BLE_UNAVAILABLE: &str =
+    "local Bluetooth is disabled; configure a BLE proxy with matc::ble::set_proxy or enable the `ble` Cargo feature";
+
+/// Set the process-wide BLE proxy, or remove it with `None`.
 ///
 /// In-flight operations and discovered peripheral handles retain their original
 /// backend. Configure this before starting scans or commissioning.
+/// Without a proxy, new operations use local Bluetooth if the `ble` feature is
+/// enabled, otherwise they return an error.
 pub fn set_proxy(proxy: Option<Arc<dyn BleProxy>>) {
     let enabled = proxy.is_some();
     let previous = std::mem::replace(
@@ -42,8 +54,18 @@ pub fn set_proxy(proxy: Option<Arc<dyn BleProxy>>) {
     match (previous.is_some(), enabled) {
         (false, true) => log::info!("BLE: proxy set, BLE operations now use the proxy"),
         (true, true) => log::info!("BLE: proxy replaced, BLE operations use the new proxy"),
-        (true, false) => log::info!("BLE: proxy removed, BLE operations now use local Bluetooth"),
-        (false, false) => log::debug!("BLE: no proxy set, BLE operations use local Bluetooth"),
+        (was_enabled, false) => {
+            let backend = if cfg!(feature = "ble") {
+                "BLE operations use local Bluetooth"
+            } else {
+                "BLE operations are unavailable until a proxy is set (local Bluetooth is disabled)"
+            };
+            if was_enabled {
+                log::info!("BLE: proxy removed, {backend}");
+            } else {
+                log::debug!("BLE: no proxy set, {backend}");
+            }
+        }
     }
     drop(previous);
 }
@@ -60,6 +82,7 @@ fn current_proxy() -> Option<Arc<dyn BleProxy>> {
 /// A discovered peripheral bound to the backend that discovered it.
 #[derive(Clone)]
 pub enum PeripheralHandle {
+    #[cfg(feature = "ble")]
     Local(Peripheral),
     Proxy {
         proxy: Arc<dyn BleProxy>,
@@ -70,6 +93,7 @@ pub enum PeripheralHandle {
 impl std::fmt::Debug for PeripheralHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "ble")]
             Self::Local(peripheral) => f.debug_tuple("Local").field(peripheral).finish(),
             Self::Proxy { address, .. } => {
                 f.debug_struct("Proxy").field("address", address).finish()
@@ -78,6 +102,7 @@ impl std::fmt::Debug for PeripheralHandle {
     }
 }
 
+#[cfg(feature = "ble")]
 impl From<Peripheral> for PeripheralHandle {
     fn from(peripheral: Peripheral) -> Self {
         Self::Local(peripheral)
@@ -120,6 +145,16 @@ pub async fn find_by_discriminator(discriminator: u16, short_match: bool, scan_t
         );
         return proxy::find(proxy, discriminator, short_match, scan_timeout).await;
     }
+    #[cfg(feature = "ble")]
+    {
+        find_local(discriminator, short_match, scan_timeout).await
+    }
+    #[cfg(not(feature = "ble"))]
+    bail!("{LOCAL_BLE_UNAVAILABLE}")
+}
+
+#[cfg(feature = "ble")]
+async fn find_local(discriminator: u16, short_match: bool, scan_timeout: Duration) -> Result<BlePeripheral> {
     log::info!(
         "BLE: searching discriminator {} (short={}) via local Bluetooth ({}s)",
         discriminator,
@@ -189,6 +224,16 @@ pub async fn scan_commissionable(scan_timeout: Duration) -> Result<Vec<Commissio
         log::info!("BLE: proxy scan found {} commissionable device(s)", found.len());
         return Ok(found);
     }
+    #[cfg(feature = "ble")]
+    {
+        scan_local(scan_timeout).await
+    }
+    #[cfg(not(feature = "ble"))]
+    bail!("{LOCAL_BLE_UNAVAILABLE}")
+}
+
+#[cfg(feature = "ble")]
+async fn scan_local(scan_timeout: Duration) -> Result<Vec<CommissionableDevice>> {
     log::info!("BLE: scanning via local Bluetooth ({}s)", scan_timeout.as_secs());
     let manager = Manager::new().await.context("BLE manager")?;
     let adapters = manager.adapters().await.context("listing BLE adapters")?;
@@ -255,6 +300,7 @@ fn parse_service_data(data: &[u8]) -> (u16, u16, u16, bool) {
 /// [`BlePeripheral`] with the C1/C2 channels wired up.
 pub async fn connect_peripheral(peripheral: impl Into<PeripheralHandle>) -> Result<BlePeripheral> {
     match peripheral.into() {
+        #[cfg(feature = "ble")]
         PeripheralHandle::Local(peripheral) => {
             log::info!("BLE: connecting {} via local Bluetooth", peripheral.id());
             connect_local(peripheral).await
@@ -266,6 +312,7 @@ pub async fn connect_peripheral(peripheral: impl Into<PeripheralHandle>) -> Resu
     }
 }
 
+#[cfg(feature = "ble")]
 async fn connect_local(peripheral: Peripheral) -> Result<BlePeripheral> {
     peripheral.connect().await.context("BLE connect")?;
     log::info!("BLE: connected to {} via local Bluetooth", peripheral.id());
@@ -351,6 +398,7 @@ async fn connect_local(peripheral: Peripheral) -> Result<BlePeripheral> {
     })
 }
 
+#[cfg(feature = "ble")]
 fn hex_dump(data: &[u8]) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(data.len() * 3);
